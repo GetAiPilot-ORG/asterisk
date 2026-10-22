@@ -48,7 +48,8 @@ async def verify_super_admin(
             token,
             signing_key.key,
             algorithms=["HS256", "RS256", "ES256"],
-            options={"verify_aud": False}
+            options={"verify_aud": False},
+            leeway=120
         )
     except Exception as jwks_err:
         logger.warning(f"[verify_super_admin] JWKS verification failed or skipped: {jwks_err}. Falling back to symmetric secret...")
@@ -65,8 +66,9 @@ async def verify_super_admin(
             payload = jwt.decode(
                 token,
                 secret,
-                algorithms=["HS256"],
-                options={"verify_aud": False}
+                algorithms=["HS256", "ES256", "RS256"],
+                options={"verify_aud": False},
+                leeway=120
             )
         except jwt.ExpiredSignatureError:
             raise HTTPException(status_code=401, detail="Token has expired")
