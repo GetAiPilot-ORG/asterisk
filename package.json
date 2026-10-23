@@ -1,0 +1,17 @@
+{
+  "name": "gap-voice-pilot-asterisk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OmniDim Voice AI Agent Platform & Asterisk PBX AudioSocket integration",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "lint": "npm --prefix frontend run lint",
+    "backend:dev": "powershell -Command \"& backend/.venv/Scripts/uvicorn.exe app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload\"",
+    "backend:diagnostics": "powershell -Command \"& backend/.venv/Scripts/python.exe backend/app/scripts/local_diagnostics.py\"",
+    "backend:install": "powershell -Command \"& backend/.venv/Scripts/pip.exe install -r backend/requirements.txt\"",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build"
+  }
+}
