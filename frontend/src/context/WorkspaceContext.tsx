@@ -2,6 +2,8 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { supabase } from '@/lib/supabase'
 import { useAuth } from './AuthContext'
 
+import { getApiUrl } from '@/lib/api'
+
 interface WorkspaceContextType {
   workspaceId: string | null
   authHeaders: Record<string, string> | null
@@ -20,7 +22,7 @@ const WorkspaceContext = createContext<WorkspaceContextType>({
 
 export const useWorkspace = () => useContext(WorkspaceContext)
 
-const apiUrl = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+const apiUrl = getApiUrl()
 
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const { session } = useAuth()

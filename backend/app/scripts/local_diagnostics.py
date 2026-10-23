@@ -3,6 +3,11 @@ import os
 import socket
 import logging
 
+# Ensure backend root is in sys.path
+backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 # Set logging to warning only for dependencies to keep output concise
 logging.basicConfig(level=logging.WARNING)
 

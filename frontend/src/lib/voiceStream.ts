@@ -30,6 +30,7 @@ export interface VoiceStreamCallbacks {
   onStopAudio?: () => void;
   onError?: (msg: string) => void;
   onVolumeChange?: (volume: number) => void;
+  onAudioSent?: (framesCount: number) => void;
   onSpeechStarted?: () => void;
   onSpeechEnded?: () => void;
 }
@@ -46,15 +47,31 @@ export interface LatencySummary {
 // ─────────────────────────────────────────────────────────────
 const SAMPLE_RATE = 16000;   // Deepgram expects 16 kHz
 const PCM_CHUNK_SIZE = 4096; // samples per ScriptProcessor callback
-const SPEECH_THRESHOLD = 0.03;
-const SILENCE_THRESHOLD = 0.015;
+const SPEECH_THRESHOLD = 0.012;
+const SILENCE_THRESHOLD = 0.005;
 const BARGE_IN_VOLUME_THRESHOLD = 0.04;
+
+function downsampleBuffer(buffer: Float32Array, inputRate: number, outputRate: number): Float32Array {
+  if (inputRate === outputRate) return buffer;
+  const ratio = inputRate / outputRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const originIndex = i * ratio;
+    const index = Math.floor(originIndex);
+    const decimal = originIndex - index;
+    const nextIndex = Math.min(index + 1, buffer.length - 1);
+    result[i] = buffer[index] * (1 - decimal) + buffer[nextIndex] * decimal;
+  }
+  return result;
+}
 
 export class VoiceStreamClient {
   private ws: WebSocket | null = null;
   private recordingCtx: AudioContext | null = null;
   private playbackCtx: AudioContext | null = null;
   private stream: MediaStream | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processor: ScriptProcessorNode | null = null;
   private analyser: AnalyserNode | null = null;
   private isRecording = false;
@@ -72,12 +89,16 @@ export class VoiceStreamClient {
   async connect(cfg: VoiceStreamConfig, deviceId?: string): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
+    // 1. Acquire mic and AudioContext synchronously in user gesture
+    await this._startMic(deviceId);
+
+    // 2. Open WebSocket
     this.ws = new WebSocket(cfg.wsUrl);
     this.ws.binaryType = "arraybuffer";
 
     await new Promise<void>((resolve, reject) => {
       this.ws!.onopen = () => resolve();
-      this.ws!.onerror = (e) => reject(new Error("WS connect failed"));
+      this.ws!.onerror = () => reject(new Error("WS connect failed"));
     });
 
     this.ws.onmessage = (e) => this._handleMessage(e);
@@ -86,7 +107,7 @@ export class VoiceStreamClient {
       this._stopRecording();
     };
 
-    // Send session config
+    // 3. Send session config
     this._sendJson({
       type: "config",
       voice_id: cfg.voiceId,
@@ -97,9 +118,6 @@ export class VoiceStreamClient {
       language: cfg.language ?? "en-US",
       tts_provider: cfg.ttsProvider ?? "deepgram",
     });
-
-    // Start microphone
-    await this._startMic(deviceId);
   }
 
   disconnect(): void {
@@ -124,50 +142,74 @@ export class VoiceStreamClient {
   // ── Microphone ──────────────────────────────────────────────
 
   private async _startMic(deviceId?: string): Promise<void> {
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
+      if (!isHttps) {
+        throw new Error(
+          "Microphone access blocked: Chrome on mobile blocks mic on insecure HTTP (http://192.168...). Please open https://192.168.1.34:5173 (tap 'Advanced' -> 'Proceed') or test on PC at http://localhost:5173"
+        );
+      }
+      throw new Error("Microphone API (getUserMedia) not supported in this browser.");
+    }
+
+    const constraints: MediaStreamConstraints = {
       audio: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
       },
-    });
+    };
+    if (deviceId && deviceId !== "default" && deviceId.trim() !== "") {
+      (constraints.audio as MediaTrackConstraints).deviceId = { ideal: deviceId };
+    }
 
-    // Recording context locked to 16 kHz — Deepgram expects this rate
-    this.recordingCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err: any) {
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        throw new Error("Microphone permission was denied. Please allow microphone access in your browser settings.");
+      }
+      throw err;
+    }
+
+    // Use native hardware AudioContext rate (48k/44.1k/etc.) to avoid mobile audio driver failures
+    const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+    this.recordingCtx = new AudioCtxClass();
     if (this.recordingCtx.state === "suspended") {
       await this.recordingCtx.resume();
     }
 
-    const source = this.recordingCtx.createMediaStreamSource(this.stream);
+    const inputSampleRate = this.recordingCtx.sampleRate;
+
+    // Retain sourceNode on class instance to prevent V8 garbage collector from cutting audio
+    this.sourceNode = this.recordingCtx.createMediaStreamSource(this.stream);
 
     // Analyser for volume / barge-in detection
     this.analyser = this.recordingCtx.createAnalyser();
     this.analyser.fftSize = 256;
-    source.connect(this.analyser);
+    this.sourceNode.connect(this.analyser);
 
     this.processor = this.recordingCtx.createScriptProcessor(PCM_CHUNK_SIZE, 1, 1);
-    source.connect(this.processor);
-    this.processor.connect(this.recordingCtx.destination);
+    this.sourceNode.connect(this.processor);
+
+    // CRITICAL FOR MOBILE: Connect through a muted gain node (gain=0) to destination.
+    // If connected directly, phone audio HAL activates hardware echo cancellation and completely zeros out the mic input!
+    const muteGain = this.recordingCtx.createGain();
+    muteGain.gain.value = 0;
+    this.processor.connect(muteGain);
+    muteGain.connect(this.recordingCtx.destination);
 
     let speaking = false;
+    let framesSent = 0;
 
     this.processor.onaudioprocess = (e) => {
       const channelData = e.inputBuffer.getChannelData(0);
 
-      // Volume
+      // Volume calculation
       let sum = 0;
       for (let i = 0; i < channelData.length; i++) sum += channelData[i] ** 2;
       const vol = Math.sqrt(sum / channelData.length);
       this.callbacks.onVolumeChange?.(vol);
-
-      // Client-side volume-based barge-in is disabled to prevent echo/ambient feedback from falsely cutting off responses.
-      // We rely on the backend's highly accurate Deepgram VAD SpeechStarted event instead.
-      /*
-      if (this.isPlaying && vol > BARGE_IN_VOLUME_THRESHOLD) {
-        this.bargeIn();
-      }
-      */
 
       // Speech activity tracking
       if (vol > SPEECH_THRESHOLD && !speaking) {
@@ -178,14 +220,19 @@ export class VoiceStreamClient {
         this.callbacks.onSpeechEnded?.();
       }
 
-      // Convert float32 → int16 PCM and send
+      // Resample down to 16 kHz for Deepgram
+      const resampled = downsampleBuffer(channelData, inputSampleRate, SAMPLE_RATE);
+
+      // Convert float32 → int16 PCM and send to WebSocket
       if (this.ws?.readyState === WebSocket.OPEN) {
-        const pcm = new Int16Array(channelData.length);
-        for (let i = 0; i < channelData.length; i++) {
-          const s = Math.max(-1, Math.min(1, channelData[i]));
+        const pcm = new Int16Array(resampled.length);
+        for (let i = 0; i < resampled.length; i++) {
+          const s = Math.max(-1, Math.min(1, resampled[i]));
           pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
         this.ws.send(pcm.buffer);
+        framesSent++;
+        this.callbacks.onAudioSent?.(framesSent);
       }
     };
 
@@ -195,6 +242,10 @@ export class VoiceStreamClient {
   private _stopRecording(): void {
     this.processor?.disconnect();
     this.processor = null;
+    this.sourceNode?.disconnect();
+    this.sourceNode = null;
+    this.analyser?.disconnect();
+    this.analyser = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.recordingCtx?.close();

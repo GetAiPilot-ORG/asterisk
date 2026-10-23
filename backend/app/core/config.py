@@ -1,6 +1,9 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from typing import Optional
+from pathlib import Path
+
+_BACKEND_ENV = str(Path(__file__).resolve().parent.parent.parent / '.env')
 
 class Settings(BaseSettings):
     # Supabase
@@ -80,7 +83,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 4.0
     tts_timeout_seconds: float = 5.0
 
-    # Call Admission Control (CAC) Configs
+
+    # Call Admission Control (CAC) Configs
     allow_calls_without_redis: bool = False
     default_workspace_max_concurrent_calls: int = 1
     default_agent_max_concurrent_calls: int = 1
@@ -108,7 +112,7 @@ class Settings(BaseSettings):
     asterisk_test_beep_on_connect: bool = False
     
     model_config = {
-        "env_file": ".env",
+        "env_file": (_BACKEND_ENV, ".env"),
         "case_sensitive": False,
         "env_prefix": "",
         "extra": "ignore"

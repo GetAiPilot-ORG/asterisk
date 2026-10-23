@@ -27,21 +27,16 @@ import {
   Zap,
   Play,
   Pause,
+  AlertTriangle,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { VoiceStreamClient, type LatencySummary } from "@/lib/voiceStream";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { cn } from "@/lib/utils";
+import { getApiUrl } from "@/lib/api";
 
-const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"
-).replace(/\/$/, "");
-
-const API_URL = (
-  import.meta.env.VITE_API_URL || "http://localhost:8000"
-).replace(/\/$/, "");
-
-// WebSocket URL: swap http(s) → ws(s)
+const API_BASE = getApiUrl();
+const API_URL = getApiUrl();
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 interface ConfigResponse {
@@ -134,6 +129,8 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
   const [llmResponseText, setLlmResponseText] = useState("");
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [audioFramesSent, setAudioFramesSent] = useState(0);
+  const [isSecureContext, setIsSecureContext] = useState(true);
 
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedVoice, setSelectedVoice] = useState("");
@@ -151,6 +148,10 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
 
   // Load Config and Audio Devices on Mount
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      const isSec = window.isSecureContext ?? (window.location.protocol === "https:" || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+      setIsSecureContext(isSec);
+    }
     loadConfig();
     loadDevices();
     return () => {
@@ -270,14 +271,15 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
       animationFrameRef.current = requestAnimationFrame(draw);
       analyser.getByteTimeDomainData(dataArray);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = isUserSpeaking ? "#000000" : "#999999";
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = isUserSpeaking ? "#ff3d8b" : "#999999";
       ctx.beginPath();
       const sliceWidth = canvas.width / bufferLength;
       let x = 0;
       for (let i = 0; i < bufferLength; i++) {
-        const v = (dataArray[i] / 128.0 - 1.0) * (isUserSpeaking ? 4 : 1.5) + 1.0;
-        const y = (v * canvas.height) / 2;
+        const deviation = (dataArray[i] - 128) / 128.0;
+        const v = deviation * (isUserSpeaking ? 4.5 : 2.0);
+        const y = (canvas.height / 2) + (v * (canvas.height / 2));
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
         x += sliceWidth;
@@ -295,6 +297,7 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
     setIsConnecting(true);
     setLlmResponseText("");
     setLatency(null);
+    setAudioFramesSent(0);
     setStatus("Connecting...");
 
     const client = new VoiceStreamClient({
@@ -325,10 +328,13 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
       },
       onVolumeChange: (vol) => {
         setCurrentVolume(vol);
-        setIsUserSpeaking(vol > 0.035);
-        if (vol > 0.035 && isAssistantSpeaking) {
+        setIsUserSpeaking(vol > 0.012);
+        if (vol > 0.012 && isAssistantSpeaking) {
           setIsAssistantSpeaking(false);
         }
+      },
+      onAudioSent: (frames) => {
+        setAudioFramesSent(frames);
       },
       onSpeechStarted: () => setIsUserSpeaking(true),
       onSpeechEnded: () => setIsUserSpeaking(false),
@@ -344,7 +350,7 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
     try {
       await client.connect(
         {
-          wsUrl: `${WS_BASE}/ws/voice`,
+          wsUrl: `${getApiUrl().replace(/^http/, "ws")}/ws/voice`,
           voiceId: selectedVoice,
           systemPrompt,
           model: selectedModel,
@@ -354,7 +360,8 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
         selectedDeviceId || undefined,
       );
     } catch (err) {
-      setStatus("Mic / connection error: " + (err instanceof Error ? err.message : String(err)));
+      console.error("Failed to start voice session:", err);
+      setStatus("Error: " + (err instanceof Error ? err.message : String(err)));
       setIsRecording(false);
       setIsConnecting(false);
     }
@@ -367,6 +374,7 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
     setIsConnecting(false);
     setIsAssistantSpeaking(false);
     setIsUserSpeaking(false);
+    setAudioFramesSent(0);
     setCurrentVolume(0);
     setStatus("idle");
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
@@ -789,6 +797,37 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
               )}
             </div>
 
+            {!isSecureContext && (
+              <div className="mx-6 mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-amber-900 text-xs shadow-sm">
+                <div className="font-semibold flex items-center gap-1.5 mb-1">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                  <span>Insecure HTTP (Microphone Blocked by Mobile Chrome)</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-amber-800">
+                  Mobile Chrome blocks microphone access on plain HTTP (<code>http://192.168.1.34:5173</code>).
+                  Please open the secure HTTPS URL to allow microphone recording:
+                </p>
+                <a
+                  href={`https://${typeof window !== "undefined" ? window.location.hostname : "192.168.1.34"}:5173${typeof window !== "undefined" ? window.location.pathname : "/dashboard/agents"}`}
+                  className="mt-1.5 inline-block font-mono text-[11px] font-bold text-amber-950 underline hover:text-black"
+                >
+                  &rarr; Open https://{typeof window !== "undefined" ? window.location.hostname : "192.168.1.34"}:5173 (Tap &quot;Advanced&quot; &rarr; &quot;Proceed&quot;)
+                </a>
+              </div>
+            )}
+
+            {status.toLowerCase().includes("error") && (
+              <div className="mx-6 mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-red-900 text-xs">
+                <div className="font-semibold flex items-center gap-1.5 mb-1">
+                  <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
+                  <span>Microphone / Connection Alert</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-red-800">
+                  {status}
+                </p>
+              </div>
+            )}
+
             <div className="flex flex-1 flex-col items-center justify-center space-y-6 p-6">
               {isRecording ? (
                 <div className="flex w-full animate-in flex-col items-center space-y-8 zoom-in duration-500">
@@ -832,9 +871,14 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
                         </span>
                       </div>
                       <span className="font-mono text-[10px] uppercase tracking-wider text-black/50">
-                        Deepgram EOT
+                        {audioFramesSent > 0 ? `${audioFramesSent} Frames Sent` : "Deepgram EOT"}
                       </span>
                     </div>
+                    {audioFramesSent === 0 && (
+                      <p className="text-[10px] font-mono text-amber-600 text-center animate-pulse pt-1">
+                        Awaiting microphone audio stream...
+                      </p>
+                    )}
                     {llmResponseText && (
                       <p className="text-[11px] text-black/60 italic leading-relaxed border-t border-black/5 pt-2">
                         {llmResponseText}
