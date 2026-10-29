@@ -92,7 +92,10 @@ export class VoiceStreamClient {
     // 1. Acquire mic and AudioContext synchronously in user gesture
     await this._startMic(deviceId);
 
-    // 2. Open WebSocket
+    // 2. Unlock playback AudioContext in user gesture so mobile Chrome allows audio output
+    await this._initPlaybackAudio();
+
+    // 3. Open WebSocket
     this.ws = new WebSocket(cfg.wsUrl);
     this.ws.binaryType = "arraybuffer";
 
@@ -255,15 +258,36 @@ export class VoiceStreamClient {
 
   // ── Audio playback ──────────────────────────────────────────
 
-  private _getPlaybackCtx(): AudioContext {
+  private async _initPlaybackAudio(): Promise<void> {
+    const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!this.playbackCtx || this.playbackCtx.state === "closed") {
-      this.playbackCtx = new AudioContext();
+      this.playbackCtx = new AudioCtxClass();
     }
-    return this.playbackCtx;
+    if (this.playbackCtx.state === "suspended") {
+      try {
+        await this.playbackCtx.resume();
+      } catch {}
+    }
+    // Prime the audio output hardware with a 1-sample silent buffer during user gesture
+    try {
+      const dummy = this.playbackCtx.createBuffer(1, 1, 22050);
+      const src = this.playbackCtx.createBufferSource();
+      src.buffer = dummy;
+      src.connect(this.playbackCtx.destination);
+      src.start(0);
+    } catch {}
   }
 
   private async _playAudioBytes(data: ArrayBuffer): Promise<void> {
-    const ctx = this._getPlaybackCtx();
+    if (!this.playbackCtx || this.playbackCtx.state === "closed") {
+      await this._initPlaybackAudio();
+    }
+    const ctx = this.playbackCtx!;
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {}
+    }
     
     // Parse raw 16-bit signed PCM (mono, 16 kHz)
     const pcmData = new Int16Array(data);
@@ -292,8 +316,11 @@ export class VoiceStreamClient {
       }
     };
 
-    // Gapless: schedule back-to-back
+    // Gapless: schedule back-to-back with drift protection
     const now = ctx.currentTime;
+    if (this.nextPlayTime < now || this.nextPlayTime > now + 1.0) {
+      this.nextPlayTime = now;
+    }
     const start = Math.max(now, this.nextPlayTime);
     source.start(start);
     this.nextPlayTime = start + buffer.duration;
