@@ -309,16 +309,20 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
       },
       onTranscript: (text, isFinal, speechFinal) => {
         setLastTranscript(text);
-        if (speechFinal) setStatus("Thinking...");
+        if (speechFinal) {
+          setStatus("Thinking...");
+          setIsUserSpeaking(false);
+        }
       },
       onLlmText: (text) => {
         setLlmResponseText(text);
+        setIsAssistantSpeaking(true);
         setStatus("Speaking...");
       },
       onTurnEnd: () => {
         setIsAssistantSpeaking(false);
         setStatus("Listening...");
-        setLlmResponseText("");
+        // Do not erase llmResponseText so the user can read the assistant's reply!
       },
       onLatency: (data) => {
         setLatency(data);
@@ -969,9 +973,19 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
               <MessageSquare className="h-5 w-5 text-black opacity-60" strokeWidth={1.5} />
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="mb-0.5 font-mono text-[9px] uppercase tracking-[0.16em] text-black/50">
-                Telemetry Transcript
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="mb-0.5 font-mono text-[9px] uppercase tracking-[0.16em] text-black/50">
+                  Telemetry Transcript
+                </p>
+                {lastTranscript && status !== "Thinking..." && status !== "Speaking..." && (
+                  <button
+                    onClick={() => void submitTextRequest(lastTranscript)}
+                    className="text-[10px] font-mono text-purple-700 bg-purple-50 hover:bg-purple-100 px-2 py-0.5 rounded-full border border-purple-200 transition-colors"
+                  >
+                    ⚡ Force Reply
+                  </button>
+                )}
+              </div>
               <p className="truncate text-[14px] font-[450] leading-tight text-black">
                 {lastTranscript ? (
                   <span className="animate-in fade-in duration-1000">{lastTranscript}</span>
@@ -1006,14 +1020,18 @@ export function Playground({ initialAgentId }: PlaygroundProps) {
               </div>
             </div>
             <div className="relative z-10 flex-1">
-              <div className="min-h-[140px] rounded-xl border border-black/5 bg-white/60 p-4 text-[13px] font-[320] italic leading-relaxed text-black/80 shadow-inner">
-                {isLoading ? (
+              <div className="min-h-[140px] rounded-xl border border-black/5 bg-white/60 p-4 text-[13px] font-[320] leading-relaxed text-black/80 shadow-inner">
+                {isLoading || status === "Thinking..." ? (
                   <div className="flex flex-col gap-2">
-                    <div className="h-4 w-3/4 bg-black/5 rounded animate-pulse" />
-                    <div className="h-4 w-1/2 bg-black/5 rounded animate-pulse" />
+                    <div className="flex items-center gap-2 text-xs text-purple-700 font-medium">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Agent thinking &amp; generating response...
+                    </div>
+                    <div className="h-3 w-3/4 bg-black/5 rounded animate-pulse" />
+                    <div className="h-3 w-1/2 bg-black/5 rounded animate-pulse" />
                   </div>
                 ) : llmResponseText ? (
-                  <span className="animate-in fade-in duration-300">{llmResponseText}</span>
+                  <span className="animate-in fade-in duration-300 not-italic font-normal">{llmResponseText}</span>
                 ) : status === "idle" || status === "Listening..." ? (
                   "Synthesizer in standby. High-fidelity output will appear here."
                 ) : (
